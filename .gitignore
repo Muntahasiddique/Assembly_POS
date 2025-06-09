@@ -1,0 +1,31 @@
+# Ignore executable and object files
+*.exe
+*.obj
+*.o
+
+# Ignore backup and temporary files
+*~
+*.bak
+*.tmp
+
+# Ignore VSCode settings (optional, if project-specific settings should not be shared)
+.vscode/
+
+# Ignore compiled output
+*.lib
+
+# Ignore data files generated during runtime or testing
+*.dat
+
+# Ignore user-specific include files (if auto-generated or not needed in version control)
+User32.Lib
+Kernel32.Lib
+Irvine32.lib
+Irvine32.inc
+VirtualKeys.inc
+SmallWin.inc
+
+# If you have a build or output directory, ignore it
+/build/
+/bin/
+/out/
