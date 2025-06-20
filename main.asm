@@ -11,6 +11,7 @@ hundred REAL8 100.0
 ; File handling variables
 productsFilename BYTE "products.dat",0
 cardFilename    BYTE "cardinfo.dat",0
+invoiceFilename BYTE "invoice.txt",0
 fileHandle HANDLE ?
 bytesRead DWORD ?
 writeCount DWORD ?
@@ -31,6 +32,7 @@ emptyInputMsg  BYTE 0dh,0ah,"** Input cannot be empty or invalid! **", 0dh,0ah, 
 saveSuccessMsg BYTE 0dh,0ah,"                                      ** Products Saved Successfully **", 0dh,0ah, 0
 loadSuccessMsg BYTE 0dh,0ah,"                                      ** Products Loaded Successfully **", 0dh,0ah, 0
 fileErrorMsg   BYTE 0dh,0ah,"                                      ** Error accessing file! **", 0dh,0ah, 0
+invoiceSuccessMsg BYTE 0dh,0ah,"                               ** Invoice Generated Successfully **", 0dh,0ah, 0
 
 nameBuffer BYTE 50 DUP(0)
 priceBuffer BYTE 20 DUP(0)
@@ -78,6 +80,20 @@ fileMenuPrompt BYTE 0dh,0ah
                BYTE "                                                   * 3. Return to Main Menu        *", 0dh,0ah
                BYTE "                                                   **********************************", 0dh,0ah
                BYTE "                                                       >> Enter your *Choice*: ", 0
+
+; Invoice related variables
+invoiceHeader BYTE "                        ================== INVOICE ==================", 0dh,0ah,0
+invoiceDateLabel BYTE "                        Date: ",0
+invoiceTimeLabel BYTE "                        Time: ",0
+invoiceSeparator BYTE "                        ------------------------------------------",0dh,0ah,0
+invoiceItemHeader BYTE "                        ID  Name                Price    Qty  Total",0dh,0ah,0
+invoiceTotalLabel BYTE "                        Total Amount: $",0
+invoiceCardLabel BYTE "                        Paid with Card: ",0
+invoiceThankYou BYTE "                        Thank you for your purchase!",0dh,0ah,0
+
+currentDate SYSTEMTIME <>
+dateString BYTE "YYYY/MM/DD",0
+timeString BYTE "HH:MM:SS",0
 
 productCount DWORD 0
 
@@ -731,7 +747,9 @@ display_total_cents:
     ; Process payment
     call EnterCardDetails
     
-    ; After successful payment
+    ; After successful payment, generate invoice
+    call GenerateInvoice
+    
     mov edx, OFFSET paymentSuccessMsg
     call WriteString
     mov edx, OFFSET pauseMsg
@@ -742,6 +760,499 @@ display_total_cents:
 noProductsForPayment:
     ret
 ProcessPayment ENDP
+
+GenerateInvoice PROC
+    ; Create or overwrite the invoice file
+    INVOKE CreateFile,
+        ADDR invoiceFilename,
+        GENERIC_WRITE,
+        DO_NOT_SHARE,
+        NULL,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        0
+    
+    mov fileHandle, eax
+    cmp eax, INVALID_HANDLE_VALUE
+    je invoiceError
+
+    ; Get current date and time
+    INVOKE GetLocalTime, ADDR currentDate
+    
+    ; Format date (YYYY/MM/DD)
+    movzx eax, currentDate.wYear
+    mov edi, OFFSET dateString
+    call FormatNumber4
+    mov byte ptr [edi], '/'
+    inc edi
+    movzx eax, currentDate.wMonth
+    call FormatNumber2
+    mov byte ptr [edi], '/'
+    inc edi
+    movzx eax, currentDate.wDay
+    call FormatNumber2
+    
+    ; Format time (HH:MM:SS)
+    movzx eax, currentDate.wHour
+    mov edi, OFFSET timeString
+    call FormatNumber2
+    mov byte ptr [edi], ':'
+    inc edi
+    movzx eax, currentDate.wMinute
+    call FormatNumber2
+    mov byte ptr [edi], ':'
+    inc edi
+    movzx eax, currentDate.wSecond
+    call FormatNumber2
+    
+    ; Write invoice header
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR invoiceHeader,
+        LENGTHOF invoiceHeader - 1,
+        ADDR writeCount,
+        NULL
+    
+    ; Write date
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR invoiceDateLabel,
+        LENGTHOF invoiceDateLabel - 1,
+        ADDR writeCount,
+        NULL
+    
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR dateString,
+        LENGTHOF dateString - 1,
+        ADDR writeCount,
+        NULL
+    
+    ; Write new line
+    mov byte ptr [dateString], 0Dh
+    mov byte ptr [dateString+1], 0Ah
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR dateString,
+        2,
+        ADDR writeCount,
+        NULL
+    
+    ; Write time
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR invoiceTimeLabel,
+        LENGTHOF invoiceTimeLabel - 1,
+        ADDR writeCount,
+        NULL
+    
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR timeString,
+        LENGTHOF timeString - 1,
+        ADDR writeCount,
+        NULL
+    
+    ; Write new line
+    mov byte ptr [timeString], 0Dh
+    mov byte ptr [timeString+1], 0Ah
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR timeString,
+        2,
+        ADDR writeCount,
+        NULL
+    
+    ; Write separator
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR invoiceSeparator,
+        LENGTHOF invoiceSeparator - 1,
+        ADDR writeCount,
+        NULL
+    
+    ; Write item header
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR invoiceItemHeader,
+        LENGTHOF invoiceItemHeader - 1,
+        ADDR writeCount,
+        NULL
+    
+    ; Write all products
+    mov ecx, productCount
+    xor esi, esi
+    fldz    ; Initialize total to 0
+
+writeProducts:
+    push ecx
+    
+    mov eax, esi
+    imul eax, SIZEOF Product
+    lea edi, productArray
+    add edi, eax
+    
+    ; Write product ID (right aligned)
+    mov eax, [edi]
+    mov ebx, OFFSET priceString
+    call FormatNumber4
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR priceString,
+        4,
+        ADDR writeCount,
+        NULL
+    
+    ; Write space separator
+    mov byte ptr [priceString], ' '
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR priceString,
+        1,
+        ADDR writeCount,
+        NULL
+    
+    ; Write product name (truncated to 18 chars)
+    mov ecx, 18
+    mov esi, edi
+    add esi, 4  ; point to name
+    mov edi, OFFSET priceString
+    
+copyName:
+    mov al, [esi]
+    cmp al, 0
+    je nameCopied
+    mov [edi], al
+    inc esi
+    inc edi
+    loop copyName
+    
+nameCopied:
+    mov byte ptr [edi], 0
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR priceString,
+        18,
+        ADDR writeCount,
+        NULL
+    
+    ; Write price (formatted as $XX.XX)
+    fld QWORD PTR [productArray + eax + 54]  ; Load price
+    fadd st(1), st(0)                        ; Add to running total
+    
+    ; Format price
+    mov edi, OFFSET priceString
+    call FormatPrice
+    
+    ; Write price
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR priceString,
+        8,  ; $XXXX.XX
+        ADDR writeCount,
+        NULL
+    
+    ; Write space separator
+    mov byte ptr [priceString], ' '
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR priceString,
+        1,
+        ADDR writeCount,
+        NULL
+    
+    ; Write quantity (always 1 for now)
+    mov byte ptr [priceString], '1'
+    mov byte ptr [priceString+1], ' '
+    mov byte ptr [priceString+2], ' '
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR priceString,
+        3,
+        ADDR writeCount,
+        NULL
+    
+    ; Write space separator
+    mov byte ptr [priceString], ' '
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR priceString,
+        1,
+        ADDR writeCount,
+        NULL
+    
+    ; Write total for this item (same as price since qty=1)
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR priceString,
+        8,  ; $XXXX.XX
+        ADDR writeCount,
+        NULL
+    
+    ; Write new line
+    mov byte ptr [priceString], 0Dh
+    mov byte ptr [priceString+1], 0Ah
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR priceString,
+        2,
+        ADDR writeCount,
+        NULL
+    
+    pop ecx
+    inc esi
+    dec ecx
+    jnz writeProducts
+    
+    ; Write separator
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR invoiceSeparator,
+        LENGTHOF invoiceSeparator - 1,
+        ADDR writeCount,
+        NULL
+    
+    ; Write total amount
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR invoiceTotalLabel,
+        LENGTHOF invoiceTotalLabel - 1,
+        ADDR writeCount,
+        NULL
+    
+    ; Format total amount
+    fstp tempReal8  ; Store total
+    mov edi, OFFSET priceString
+    call FormatPrice
+    
+    ; Write total
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR priceString,
+        8,  ; $XXXX.XX
+        ADDR writeCount,
+        NULL
+    
+    ; Write new line
+    mov byte ptr [priceString], 0Dh
+    mov byte ptr [priceString+1], 0Ah
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR priceString,
+        2,
+        ADDR writeCount,
+        NULL
+    
+    ; Write card info
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR invoiceCardLabel,
+        LENGTHOF invoiceCardLabel - 1,
+        ADDR writeCount,
+        NULL
+    
+    ; Mask card number (show only last 4 digits)
+    mov esi, OFFSET cardNumBuffer
+    mov edi, OFFSET priceString
+    mov ecx, 12
+    mov al, '*'
+maskLoop:
+    mov [edi], al
+    inc edi
+    loop maskLoop
+    
+    ; Copy last 4 digits
+    add esi, 12
+    mov ecx, 4
+copyLast4:
+    mov al, [esi]
+    mov [edi], al
+    inc esi
+    inc edi
+    loop copyLast4
+    
+    mov byte ptr [edi], 0
+    
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR priceString,
+        16,
+        ADDR writeCount,
+        NULL
+    
+    ; Write new line
+    mov byte ptr [priceString], 0Dh
+    mov byte ptr [priceString+1], 0Ah
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR priceString,
+        2,
+        ADDR writeCount,
+        NULL
+    
+    ; Write thank you message
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR invoiceThankYou,
+        LENGTHOF invoiceThankYou - 1,
+        ADDR writeCount,
+        NULL
+    
+    INVOKE CloseHandle, fileHandle
+    
+    mov edx, OFFSET invoiceSuccessMsg
+    call WriteString
+    ret
+
+invoiceError:
+    mov edx, OFFSET fileErrorMsg
+    call WriteString
+    ret
+GenerateInvoice ENDP
+
+; Helper procedure to format a number as 4 digits (for year)
+FormatNumber4 PROC
+    push eax
+    push ebx
+    push ecx
+    push edx
+    
+    mov ebx, 1000
+    xor ecx, ecx
+    
+formatLoop4:
+    xor edx, edx
+    div ebx
+    add al, '0'
+    mov [edi], al
+    inc edi
+    
+    mov eax, ebx
+    mov ebx, 10
+    xor edx, edx
+    div ebx
+    mov ebx, eax
+    
+    mov eax, edx
+    inc ecx
+    cmp ecx, 3
+    jle formatLoop4
+    
+    add dl, '0'
+    mov [edi], dl
+    inc edi
+    
+    pop edx
+    pop ecx
+    pop ebx
+    pop eax
+    ret
+FormatNumber4 ENDP
+
+; Helper procedure to format a number as 2 digits (with leading zero if needed)
+FormatNumber2 PROC
+    push eax
+    push edx
+    
+    xor edx, edx
+    mov dl, al
+    mov al, '0'
+    cmp dl, 10
+    jae twoDigits
+    mov [edi], al
+    inc edi
+    mov al, dl
+    add al, '0'
+    mov [edi], al
+    inc edi
+    jmp doneFormat2
+    
+twoDigits:
+    mov eax, edx
+    xor edx, edx
+    mov ebx, 10
+    div ebx
+    add al, '0'
+    mov [edi], al
+    inc edi
+    add dl, '0'
+    mov [edi], dl
+    inc edi
+    
+doneFormat2:
+    pop edx
+    pop eax
+    ret
+FormatNumber2 ENDP
+
+; Helper procedure to format price as $XXXX.XX
+FormatPrice PROC
+    push eax
+    push ebx
+    push ecx
+    push edx
+    
+    mov byte ptr [edi], '$'
+    inc edi
+    
+    ; Extract dollars
+    fld tempReal8
+    frndint
+    fistp DWORD PTR tempReal8
+    mov eax, DWORD PTR tempReal8
+    
+    ; Format dollars
+    mov ebx, 1000
+    xor ecx, ecx
+    
+dollarLoop:
+    xor edx, edx
+    div ebx
+    add al, '0'
+    mov [edi], al
+    inc edi
+    
+    mov eax, ebx
+    mov ebx, 10
+    xor edx, edx
+    div ebx
+    mov ebx, eax
+    
+    mov eax, edx
+    inc ecx
+    cmp ecx, 3
+    jle dollarLoop
+    
+    ; Decimal point
+    mov byte ptr [edi], '.'
+    inc edi
+    
+    ; Calculate cents (fractional part * 100)
+    fld tempReal8
+    fild DWORD PTR tempReal8    ; Load integer part
+    fsubp st(1), st(0)         ; Get fractional part
+    fmul hundred               ; Multiply by 100
+    frndint                    ; Round cents
+    fistp DWORD PTR tempReal8  ; Store cents
+    
+    ; Format cents (always 2 digits)
+    mov eax, DWORD PTR tempReal8
+    xor edx, edx
+    mov ebx, 10
+    div ebx
+    add al, '0'
+    mov [edi], al
+    inc edi
+    add dl, '0'
+    mov [edi], dl
+    inc edi
+    
+    pop edx
+    pop ecx
+    pop ebx
+    pop eax
+    ret
+FormatPrice ENDP
 
 EnterCardDetails PROC
     ; Clear buffers
