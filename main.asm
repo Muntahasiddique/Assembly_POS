@@ -2,17 +2,20 @@ INCLUDE Irvine32.inc
 INCLUDELIB kernel32.lib
 
 .data
+; Product Management Variables
 maxProducts = 100
 priceString BYTE 16 DUP(0)
 tempReal8 REAL8 ?
 hundred REAL8 100.0
 
 ; File handling variables
-filename BYTE "products.dat",0
+productsFilename BYTE "products.dat",0
+cardFilename    BYTE "cardinfo.dat",0
 fileHandle HANDLE ?
 bytesRead DWORD ?
 writeCount DWORD ?
 
+; Product Management Prompts
 promptName     BYTE 0dh, 0ah, "                                    >> Enter *Product Name*: ", 0
 promptPrice    BYTE 0dh, 0ah, "                                    >> Enter *Product Price*: ", 0
 promptStock    BYTE 0dh, 0ah, "                                    >> Enter *Stock Quantity*: ", 0
@@ -36,6 +39,16 @@ stockBuffer BYTE 20 DUP(0)
 invalidPriceMsg BYTE 0dh,0ah,"** Invalid Price! Please enter a valid positive number. **",0dh,0ah,0
 invalidStockMsg BYTE 0dh,0ah,"** Invalid Stock! Please enter a valid positive integer. **",0dh,0ah,0
 
+; Card Payment Prompts
+promptCardNum   BYTE 0dh, 0ah, ">> Enter Card Number (16 digits): ", 0
+promptCardPIN   BYTE 0dh, 0ah, ">> Enter Card PIN (4 digits): ", 0
+invalidCardMsg  BYTE 0dh,0ah,"[!] Invalid Card Number. Must be exactly 16 digits (0-9).", 0
+invalidPINMsg   BYTE 0dh,0ah,"[!] Invalid PIN. Must be exactly 4 digits (0-9).", 0
+cardSavedMsg    BYTE 0dh,0ah,"** Card Info Saved Successfully **", 0dh,0ah, 0
+paymentSuccessMsg BYTE 0dh,0ah,"** Payment Processed Successfully **", 0dh,0ah, 0
+totalAmountMsg  BYTE 0dh,0ah,">> Total Amount: $",0
+
+; Menu Prompts
 menuPrompt BYTE 0dh,0ah
            BYTE "                                                   **********************************", 0dh,0ah
            BYTE "                                                   *        POS Invoice System      *", 0dh,0ah
@@ -44,7 +57,8 @@ menuPrompt BYTE 0dh,0ah
            BYTE "                                                   * 2. List Products               *", 0dh,0ah
            BYTE "                                                   * 3. Delete Product              *", 0dh,0ah
            BYTE "                                                   * 4. Save/Load Products          *", 0dh,0ah
-           BYTE "                                                   * 5. Exit                        *", 0dh,0ah
+           BYTE "                                                   * 5. Process Payment             *", 0dh,0ah
+           BYTE "                                                   * 6. Exit                        *", 0dh,0ah
            BYTE "                                                   **********************************", 0dh,0ah
            BYTE "                                                       >> Enter your *Choice*: ", 0
 
@@ -67,6 +81,12 @@ fileMenuPrompt BYTE 0dh,0ah
 
 productCount DWORD 0
 
+; Card Payment Variables
+cardNumBuffer   BYTE 17 DUP(0)    ; 16 digits + null terminator
+pinBuffer       BYTE 5 DUP(0)     ; 4 digits + null terminator
+pinHash         DWORD ?
+
+; Product Structure
 Product STRUCT
     id DWORD ?
     name BYTE 50 DUP(0)
@@ -76,6 +96,7 @@ Product ENDS
 
 productArray Product maxProducts DUP(<0>)
 
+; Console Handling
 .data?
 hConsole HANDLE ?
 colorAttr WORD ?
@@ -108,6 +129,8 @@ menu:
     cmp eax, 4
     je fileOps
     cmp eax, 5
+    je processPayment
+    cmp eax, 6
     je quit
     
     ; Invalid menu choice
@@ -144,6 +167,11 @@ delete:
 fileOps:
     call Clrscr
     call FileOperations
+    jmp menu
+
+processPayment:
+    call Clrscr
+    call ProcessPayment
     jmp menu
 
 quit:
@@ -214,7 +242,7 @@ FileOperations ENDP
 SaveProductsToFile PROC
     ; Create or overwrite the file
     INVOKE CreateFile,
-        ADDR filename,
+        ADDR productsFilename,
         GENERIC_WRITE,
         DO_NOT_SHARE,
         NULL,
@@ -260,7 +288,7 @@ SaveProductsToFile ENDP
 LoadProductsFromFile PROC
     ; Open the file for reading
     INVOKE CreateFile,
-        ADDR filename,
+        ADDR productsFilename,
         GENERIC_READ,
         DO_NOT_SHARE,
         NULL,
@@ -453,7 +481,6 @@ noSpace:
     ret
 CreateProduct ENDP
 
-
 ListProducts PROC
     call Clrscr
     cmp productCount, 0
@@ -636,5 +663,271 @@ found:
 noProductsToDelete:
     ret
 DeleteProduct ENDP
+
+; Payment Processing Functions
+ProcessPayment PROC
+    call Clrscr
+    call ListProducts
+    cmp productCount, 0
+    je noProductsForPayment
+    
+    ; Calculate total amount (sum all product prices)
+    fldz    ; Initialize total to 0
+    mov ecx, productCount
+    xor esi, esi
+    
+calculateTotal:
+    mov eax, esi
+    imul eax, SIZEOF Product
+    lea edi, productArray
+    add edi, eax
+    
+    fld QWORD PTR [edi + 54]    ; Load product price
+    faddp st(1), st(0)          ; Add to total
+    
+    inc esi
+    loop calculateTotal
+    
+    ; Display total amount
+    call Crlf
+    mov edx, OFFSET totalAmountMsg
+    call WriteString
+    
+    ; Format and display the total price
+    fst tempReal8               ; Store in memory
+    
+    ; Extract integer part (dollars)
+    fld tempReal8
+    frndint                     ; Round to integer
+    fistp DWORD PTR tempReal8   ; Store as integer
+    mov eax, DWORD PTR tempReal8
+    call WriteDec               ; Display dollars
+    
+    ; Display decimal point
+    mov al, '.'
+    call WriteChar
+    
+    ; Calculate cents (fractional part * 100)
+    fld tempReal8
+    fild DWORD PTR tempReal8    ; Load integer part
+    fsubp st(1), st(0)         ; Get fractional part
+    fmul hundred               ; Multiply by 100
+    frndint                    ; Round cents
+    fistp DWORD PTR tempReal8  ; Store cents
+    
+    ; Display cents (always 2 digits)
+    mov eax, DWORD PTR tempReal8
+    cmp eax, 10
+    jae display_total_cents
+    push eax
+    mov al, '0'
+    call WriteChar
+    pop eax
+    
+display_total_cents:
+    call WriteDec
+    call Crlf
+    
+    ; Process payment
+    call EnterCardDetails
+    
+    ; After successful payment
+    mov edx, OFFSET paymentSuccessMsg
+    call WriteString
+    mov edx, OFFSET pauseMsg
+    call WriteString
+    call ReadChar
+    ret
+    
+noProductsForPayment:
+    ret
+ProcessPayment ENDP
+
+EnterCardDetails PROC
+    ; Clear buffers
+    mov ecx, 16
+    mov edi, OFFSET cardNumBuffer
+    xor al, al
+    rep stosb
+    
+    mov ecx, 4
+    mov edi, OFFSET pinBuffer
+    xor al, al
+    rep stosb
+
+getCardNumber:
+    mov edx, OFFSET promptCardNum
+    call WriteString
+
+    mov edx, OFFSET cardNumBuffer
+    mov ecx, 17          ; max 16 digits + null terminator
+    call ReadString      ; eax = number of chars entered (excluding null terminator)
+
+    cmp eax, 16
+    jne invalidCard
+
+    ; Validate all digits
+    mov ecx, 0
+    mov esi, OFFSET cardNumBuffer
+validateCardLoop:
+    mov al, [esi + ecx]
+    cmp al, '0'
+    jb invalidCard
+    cmp al, '9'
+    ja invalidCard
+    inc ecx
+    cmp ecx, 16
+    jl validateCardLoop
+    jmp getPIN
+
+invalidCard:
+    mov eax, hConsole
+    mov cx, 04h
+    INVOKE SetConsoleTextAttribute, eax, cx
+    
+    mov edx, OFFSET invalidCardMsg
+    call WriteString
+    
+    mov cx, 0F5h
+    INVOKE SetConsoleTextAttribute, eax, cx
+    
+    jmp getCardNumber
+
+getPIN:
+    mov edx, OFFSET promptCardPIN
+    call WriteString
+
+    call ReadMaskedPIN
+
+    ; Verify PIN length
+    mov esi, OFFSET pinBuffer
+    mov ecx, 0
+countPIN:
+    cmp byte ptr [esi + ecx], 0
+    je pinCounted
+    inc ecx
+    jmp countPIN
+    
+pinCounted:
+    cmp ecx, 4
+    jne invalidPIN
+
+    ; Hash the PIN (simple XOR hash with rotation)
+    xor eax, eax
+    xor ecx, ecx
+    mov esi, OFFSET pinBuffer
+hashLoop:
+    movzx ebx, BYTE PTR [esi + ecx]
+    xor eax, ebx
+    rol eax, 1           ; Rotate left for slightly better hashing
+    inc ecx
+    cmp ecx, 4
+    jl hashLoop
+    mov pinHash, eax
+
+    ; Save card info to file
+    INVOKE CreateFile,
+        ADDR cardFilename,
+        GENERIC_WRITE,
+        0,               ; no sharing
+        NULL,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        0
+    mov fileHandle, eax
+    cmp eax, INVALID_HANDLE_VALUE
+    je cardFileError
+
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR cardNumBuffer,
+        16,
+        ADDR writeCount,
+        NULL
+
+    INVOKE WriteFile,
+        fileHandle,
+        ADDR pinHash,
+        SIZEOF pinHash,
+        ADDR writeCount,
+        NULL
+
+    INVOKE CloseHandle, fileHandle
+
+    mov edx, OFFSET cardSavedMsg
+    call WriteString
+    ret
+
+invalidPIN:
+    mov eax, hConsole
+    mov cx, 04h
+    INVOKE SetConsoleTextAttribute, eax, cx
+    
+    mov edx, OFFSET invalidPINMsg
+    call WriteString
+    
+    mov cx, 0F5h
+    INVOKE SetConsoleTextAttribute, eax, cx
+    
+    jmp getPIN
+
+cardFileError:
+    mov edx, OFFSET fileErrorMsg
+    call WriteString
+    ret
+EnterCardDetails ENDP
+
+ReadMaskedPIN PROC
+    mov ecx, 0            ; counter
+    mov esi, OFFSET pinBuffer
+read_loop:
+    call ReadChar         ; read one char
+    cmp al, 0Dh           ; Enter key
+    je check_len          ; if pressed enter early, check length
+    cmp al, '0'
+    jb invalid_char
+    cmp al, '9'
+    ja invalid_char
+
+    ; Store digit and echo '*'
+    mov [esi + ecx], al
+    mov dl, '*'
+    call WriteChar
+
+    inc ecx
+    cmp ecx, 4
+    jl read_loop
+    jmp pin_done
+
+check_len:
+    cmp ecx, 4
+    je pin_done
+
+invalid_char:
+    ; Clear the buffer and start over
+    mov ecx, 4
+    mov edi, OFFSET pinBuffer
+    xor al, al
+    rep stosb
+    
+    mov eax, hConsole
+    mov cx, 04h
+    INVOKE SetConsoleTextAttribute, eax, cx
+    
+    mov edx, OFFSET invalidPINMsg
+    call WriteString
+    
+    mov cx, 0F5h
+    INVOKE SetConsoleTextAttribute, eax, cx
+    
+    mov edx, OFFSET promptCardPIN
+    call WriteString
+    mov ecx, 0
+    jmp read_loop
+
+pin_done:
+    mov byte ptr [esi + ecx], 0 ; null terminate
+    ret
+ReadMaskedPIN ENDP
 
 END main
